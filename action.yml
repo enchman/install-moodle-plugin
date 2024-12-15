@@ -1,0 +1,50 @@
+name: install-moodle-plugin
+description: Install Moodle plugin
+inputs:
+  repo:
+    description: >
+      The Git repository to install the plugin from.
+    required: true
+  moodle_dir:
+    description: >
+      The path to the Moodle directory.
+    required: false
+    default: ${{ github.workspace }}
+  ref:
+    description: >
+      The Git ref to install. This can be a branch, tag, or commit SHA.
+    required: false
+    default: ''
+  path:
+    description: >
+      The path to install the plugin to.
+      If specified, the plugin will be installed to this path.
+      Otherwise, the plugin will be installed automatic according to component name.
+    required: false
+    default: ''
+  token:
+    description: >
+      The token to use for the Moodle API.
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: "composite"
+  steps:
+    - name: Prepare plugin information
+      shell: bash
+      run: |
+        chmod +x ${{ github.action_path }}/install.sh ${{ github.action_path }}/get-component-info.sh
+        ${{ github.action_path }}/install.sh
+        ${{ github.action_path }}/get-component-info.sh
+    - if: ${{ env.PLUGIN_DIR != '' }}
+      name: Install plugin
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repo }}
+        ref: ${{ inputs.ref }}
+        path: ${{ env.PLUGIN_DIR }}
+    - if: ${{ env.PLUGIN_DIR == '' }}
+      name: Unable to install plugin
+      shell: bash
+      run: echo "Unable to install plugin"
+        
