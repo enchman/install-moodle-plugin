@@ -1,0 +1,312 @@
+name: moodle-plugin-test
+
+on:
+  workflow_call:
+    inputs:
+      component:
+        description: >
+          The component name of the plugin.
+        required: true
+        type: string
+      plugin_repo:
+        description: >
+          The Git repository to install the plugin from.
+        required: true
+        type: string
+      plugin_ref:
+        description: >
+          The Git ref to install. This can be a branch, tag, or commit SHA.
+        required: false
+        type: string
+        default: ${{ github.ref }}
+      php:
+        description: >
+          The PHP version to use.
+        required: false
+        type: string
+        default: '8.2'
+      moodle_ref:
+        description: >
+          The Git ref to install Moodle from. This can be a branch, tag, or commit SHA.
+        required: false
+        type: string
+        default: ''
+      dbtype:
+        description: >
+          The database type to use.
+          Supported values: 'mysqli', 'pgsql', 'sqlsrv'.
+        required: false
+        type: string
+        default: 'mysqli'
+      owner:
+        description: >
+          The owner of the plugin repository.
+        required: false
+        type: string
+        default: ${{ github.repository_owner }}
+      dependencies:
+        description: >
+          The Git repositories to install dependencies from.
+          Format: 'org/repo@ref', 'org/repo'.
+          Example: |
+            enchman/moodle-local_mytest@main
+            moodle/moodle-block_html@main
+        required: false
+        type: string
+        default: ''
+    secrets:
+      PRIVATE_REPO_TOKEN:
+        description: >
+          The GitHub token to use for the API.
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN_DIR: ''
+      PLUGIN_NAME: ''
+      dbtype: ${{ inputs.dbtype }}
+      dbname: test
+      dbuser: test
+      dbpass: test
+    steps:
+      - name: Setting up PHP ${{ inputs.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php }}
+          ini-values: max_input_vars=5000
+          coverage: none
+      - name: Checkout Moodle
+        uses: actions/checkout@v4
+        with:
+          repository: moodle/moodle
+          ref: ${{ inputs.moodle_ref }}
+      
+      - name: Configure Moodle
+        run: |
+          echo "pathtophp=$(which php)" >> $GITHUB_ENV
+          mkdir ../moodledata
+          sudo locale-gen en_AU.UTF-8
+
+          echo '<?php' > config.php
+          echo '$env = function(string $key, string $default = ""): string {' >> config.php
+          echo '    $value = getenv($key);' >> config.php
+          echo '    return empty($value) ? $default : $value;' >> config.php
+          echo '}' >> config.php
+          echo 'unset($CFG);' >> config.php
+          echo 'global $CFG;' >> config.php
+          echo '$CFG = new stdClass();' >> config.php
+          echo '$CFG->dbtype = $env("dbtype", "mysqli");' >> config.php
+          echo '$CFG->dblibrary = "native";' >> config.php
+          echo '$CFG->dbhost = $env("dbhost", "127.0.0.1");' >> config.php
+          echo '$CFG->dbname = $env("dbname", "test");' >> config.php
+          echo '$CFG->dbuser = $env("dbuser", "test");' >> config.php
+          echo '$CFG->dbpass = $env("dbpass", "test");' >> config.php
+          echo '$CFG->prefix = "m_";' >> config.php
+          echo '$CFG->dboptions = ["dbcollation" => "utf8mb4_bin"];' >> config.php
+          echo '$host = "localhost";' >> config.php
+          echo '$CFG->wwwroot = "http://" . $host;' >> config.php
+          echo '$CFG->dataroot = realpath(dirname(__DIR__)) . "/moodledata";' >> config.php
+          echo '$CFG->admin = "admin";' >> config.php
+          echo '$CFG->directorypermissions = 0777;' >> config.php
+          echo '$CFG->debug = (E_ALL | E_STRICT);' >> config.php
+          echo '$CFG->debugdisplay = 1;' >> config.php
+          echo '$CFG->debugstringids = 1;' >> config.php
+          echo '$CFG->perfdebug = 15;' >> config.php
+          echo '$CFG->debugpageinfo = 1;' >> config.php
+          echo '$CFG->allowthemechangeonurl = 1;' >> config.php
+          echo '$CFG->passwordpolicy = 0;' >> config.php
+          echo '$CFG->cronclionly = 0;' >> config.php
+          echo '$CFG->pathtophp = getenv("pathtophp");' >> config.php
+          echo '$CFG->phpunit_dataroot  = realpath(dirname(__DIR__)) . "/phpunitdata";' >> config.php
+          echo '$CFG->phpunit_prefix = "t_";' >> config.php
+          echo 'define("TEST_EXTERNAL_FILES_HTTP_URL", "http://". $host .":8080");' >> config.php
+          echo 'define("TEST_EXTERNAL_FILES_HTTPS_URL", "http://". $host .":8080");' >> config.php
+          echo 'define("TEST_SESSION_REDIS_HOST", $host);' >> config.php
+          echo 'define("TEST_CACHESTORE_REDIS_TESTSERVERS", $host);' >> config.php
+          echo 'require_once(__DIR__ . "/lib/setup.php");' >> config.php
+
+      - name: Install dependencies
+        run: |
+          myorg=${{ inputs.owner }}
+          plugin_repo=${{ inputs.plugin_repo }}
+          plugin_ref=${{ inputs.plugin_ref }}
+          dependencies=${{ inputs.dependencies }}
+
+          download_version_file () {
+              repo=$1
+              branch=${2:-"HEAD"}
+              file="version.php"
+              save_dir="versions/$repo/$branch"
+              save_as="$save_dir/$file"
+
+              if [ ! -d "$save_as" ]; then
+                  mkdir -p $save_dir
+              fi
+
+              if [ ! -f "$save_as" ]; then
+                  if [ -z "$PRIVATE_REPO_TOKEN" ]; then
+                      curl -o $save_as \
+                          -s "https://raw.githubusercontent.com/$repo/$branch/$file"
+                  else
+                      curl -o $save_as \
+                          -H "Authorization: Bearer $PRIVATE_REPO_TOKEN" \
+                          -s "https://raw.githubusercontent.com/$repo/$branch/$file"
+                  fi
+              fi
+
+              printf $save_as
+          }
+
+          get_component_name () {
+              repo=$1
+              branch=${2:-"HEAD"}
+              version_file=$(download_version_file $repo $branch)
+              component_name=$(grep '$plugin->component' $version_file | tr -s ' ' | cut -d"'" -f2)
+              echo "$component_name"
+          }
+
+          get_install_dir () {
+              component=$1
+              moodle_dir=${2:-"$GITHUB_ACTION_PATH"}
+              php -r "const MOODLE_INTERNAL = true; 
+              use \core\component;
+              require_once '$moodle_dir/config.php';
+              require_once '$moodle_dir/lib/classes/component.php';
+              if (!class_exists(component::class)) {
+                  class component extends \core_component {}
+              }
+              [\$type, \$plugin] = component::normalize_component('$component');
+              echo component::get_plugin_directory(\$type, \$plugin);"
+          }
+
+          get_repo_url () {
+              org=$1
+              repo=$2
+              if [ -z "$PRIVATE_REPO_TOKEN" ]; then
+                  echo "https://github.com/${org}/${repo}.git"
+              else
+                  echo "https://oauth2:${PRIVATE_REPO_TOKEN}@github.com/${org}/${repo}.git"
+              fi
+          }
+
+          format_dependency () {
+              dep=$1
+              if [ $dep != *@* ]; then
+                  dep="$dep@HEAD"
+              fi
+              if [[ $dep != */* ]]; then
+                  dep="$myorg/$dep"
+              fi
+              echo $dep
+          }
+
+          # Prepare plugin installation
+          install_dir=$(get_install_dir ${{ inputs.component }})
+          if [ -z "$install_dir" ]; then
+              printf "Install directory not found for $component_name\n"
+              exit 1
+          fi
+
+          printf "${{ inputs.component }} is ready to be install\n"
+
+          # Adding installation directory to env
+          echo "PLUGIN_DIR=$install_dir" >> $GITHUB_ENV
+
+          # Install dependencies
+          if [ -z "$dependencies" ]; then
+              printf "No dependencies to install\n"
+              exit 0
+          fi
+          for dep in $dependencies; do
+              dep=$(format_dependency $dep)
+              org=$(echo $dep | cut -d'/' -f1)
+              repo=$(echo $dep | cut -d'/' -f2 | cut -d'@' -f1)
+              branch=$(echo $dep | cut -d'@' -f2)
+
+              component_name=$(get_component_name "$org/$repo" $branch)
+              if [ -z "$component_name" ]; then
+                  printf "Component name not found for $org/$repo\n"
+                  continue
+              fi
+
+              install_dir=$(get_install_dir $component_name)
+              if [ -z "$install_dir" ]; then
+                  printf "Install directory not found for $component_name\n"
+                  continue
+              fi
+
+              repo_url=$(get_repo_url $org $repo)
+              if [ -z "$repo_url" ]; then
+                  printf "Repository URL not found for $org/$repo\n"
+                  continue
+              fi
+
+              printf "Installing $component_name to $install_dir\n"
+
+              git clone --quiet $repo_url $install_dir
+              git -C $install_dir fetch --quiet --all
+              git -C $install_dir checkout --quiet $branch
+
+              printf "Installed $component_name to $install_dir\n"
+          done
+
+          # Remove version files
+          rm -rf versions
+
+      - if: ${{ env.PLUGIN_DIR != '' }}
+        name: Checkout ${{ inputs.component }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.plugin_repo }}
+          ref: ${{ inputs.plugin_ref }}
+          path: ${{ env.PLUGIN_DIR }}
+      
+      - if: ${{ env.PLUGIN_DIR == '' }}
+        name: Unable to install ${{ inputs.component }}
+        shell: bash
+        run: |
+          echo "Unable to install plugin: ${{ inputs.component }}. Aborting..."
+          exit 1
+
+      - if: ${{ inputs.dbtype == 'mysqli' }}
+        name: Setting up MySQL
+        uses: moodlehq/mysql-action@v1
+        with:
+          collation server: utf8mb4_bin
+          mysql version: 8.4
+          mysql database: ${{ env.dbname }}
+          mysql user: ${{ env.dbuser }}
+          mysql password: ${{ env.dbpass }}
+          use tmpfs: true
+          tmpfs size: '1024M'
+          extra conf: --skip-log-bin
+
+      - if: ${{ inputs.dbtype == 'pgsql' }}
+        name: Setting up PostgreSQL
+        uses: m4nu56/postgresql-action@v1
+        with:
+          postgresql version: 16
+          postgresql db: ${{ env.dbname }}
+          postgresql user: ${{ env.dbuser }}
+          postgresql password: ${{ env.dbpass }}
+
+      - if: ${{ inputs.dbtype == 'sqlsrv'}}
+        name: Setting up MS SQL Server
+        uses: enchman/setup-mssql-server@v1
+        with:
+          version: 2019
+          user: ${{ env.dbuser }}
+          password: ${{ env.dbpass }}
+          database: ${{ env.dbname }}
+
+      - name: Initialize Moodle configuration & database
+        run: |
+          php admin/tool/phpunit/cli/init.php --no-composer-self-update
+
+      - name: Running PHPUnit tests
+        env:
+          dbtype: ${{ inputs.dbtype }}
+          phpunit_options: ${{ secrets.phpunit_options }}
+        run: vendor/bin/phpunit -C ${{ github.workspace }}/phpunit.xml --testsuite ${{ env.PLUGIN_NAME }}_testsuite -v --testdox
